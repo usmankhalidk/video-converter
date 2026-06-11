@@ -1,6 +1,7 @@
 'use client'
 
 import { useRef, useState } from 'react'
+import { supabase } from '@/lib/supabase'
 import { VideoRecord } from '@/lib/types'
 
 const MAX_SIZE_MB = 50
@@ -41,17 +42,31 @@ export default function UploadForm({ browserId, onUploaded }: UploadFormProps) {
 
     setUploading(true)
     try {
-      const formData = new FormData()
-      formData.append('file', file)
-      formData.append('browser_id', browserId)
+      const ext = file.name.split('.').pop()?.toLowerCase() ?? 'mp4'
+      const fileName = `${browserId}/${crypto.randomUUID()}.${ext}`
 
-      const res = await fetch('/api/upload', { method: 'POST', body: formData })
-      const json = await res.json()
-      if (!res.ok) {
-        setError(json.error || 'Upload failed')
+      const { error: storageError } = await supabase.storage
+        .from('videos')
+        .upload(fileName, file, { contentType: file.type, upsert: false })
+
+      if (storageError) {
+        setError(storageError.message)
         return
       }
-      onUploaded(json.video)
+
+      const { data: record, error: dbError } = await supabase
+        .from('videos')
+        .insert({ browser_id: browserId, video_path: fileName })
+        .select()
+        .single()
+
+      if (dbError) {
+        await supabase.storage.from('videos').remove([fileName])
+        setError(dbError.message)
+        return
+      }
+
+      onUploaded(record)
       if (inputRef.current) inputRef.current.value = ''
     } catch {
       setError('Upload failed. Please try again.')
