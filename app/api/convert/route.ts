@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from 'next/server'
+import { NextRequest } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase-admin'
 import ffmpeg from 'fluent-ffmpeg'
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg'
@@ -12,87 +12,125 @@ export const maxDuration = 300
 ffmpeg.setFfmpegPath(ffmpegInstaller.path)
 
 export async function POST(request: NextRequest) {
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'video-convert-'))
-  const inputPath = path.join(tmpDir, 'input')
-  const outputPath = path.join(tmpDir, 'output.mp4')
+  const { videoId } = await request.json()
 
-  try {
-    const { videoId } = await request.json()
-
-    if (!videoId) {
-      return NextResponse.json({ error: 'No videoId provided' }, { status: 400 })
-    }
-
-    const supabase = supabaseAdmin
-
-    const { data: record, error: fetchError } = await supabase
-      .from('videos')
-      .select('*')
-      .eq('id', videoId)
-      .single()
-
-    if (fetchError || !record) {
-      return NextResponse.json({ error: 'Video record not found' }, { status: 404 })
-    }
-
-    // Already an MP4 — nothing to do
-    if (record.video_path.toLowerCase().endsWith('.mp4')) {
-      return NextResponse.json({ error: 'Video is already MP4' }, { status: 400 })
-    }
-
-    const { data: fileData, error: downloadError } = await supabase.storage
-      .from('videos')
-      .download(record.video_path)
-
-    if (downloadError || !fileData) {
-      return NextResponse.json({ error: 'Failed to download video' }, { status: 500 })
-    }
-
-    await fs.writeFile(inputPath, Buffer.from(await fileData.arrayBuffer()))
-
-    await new Promise<void>((resolve, reject) => {
-      ffmpeg(inputPath)
-        .videoCodec('libx264')
-        .audioCodec('aac')
-        .outputOptions(['-movflags +faststart', '-preset medium', '-crf 23'])
-        .output(outputPath)
-        .on('end', () => resolve())
-        .on('error', (err) => reject(err))
-        .run()
+  if (!videoId) {
+    return new Response(JSON.stringify({ error: 'No videoId provided' }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' },
     })
-
-    const convertedBuffer = await fs.readFile(outputPath)
-
-    // New path: same folder, same uuid, but .mp4 extension
-    const convertedPath = record.video_path.replace(/\.[^/.]+$/, '.mp4')
-
-    const { error: uploadError } = await supabase.storage
-      .from('videos')
-      .upload(convertedPath, convertedBuffer, { contentType: 'video/mp4', upsert: true })
-
-    if (uploadError) {
-      return NextResponse.json({ error: uploadError.message }, { status: 500 })
-    }
-
-    // Delete the original non-MP4 file from storage
-    await supabase.storage.from('videos').remove([record.video_path])
-
-    const { data: updatedRecord, error: updateError } = await supabase
-      .from('videos')
-      .update({ video_path: convertedPath })
-      .eq('id', videoId)
-      .select()
-      .single()
-
-    if (updateError) {
-      return NextResponse.json({ error: updateError.message }, { status: 500 })
-    }
-
-    return NextResponse.json({ video: updatedRecord })
-  } catch (err) {
-    console.error('Conversion error:', err)
-    return NextResponse.json({ error: 'Conversion failed' }, { status: 500 })
-  } finally {
-    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
   }
+
+  const { readable, writable } = new TransformStream()
+  const writer = writable.getWriter()
+  const encoder = new TextEncoder()
+
+  function send(data: object) {
+    writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
+  }
+
+  ;(async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'video-convert-'))
+    const inputPath = path.join(tmpDir, 'input')
+    const outputPath = path.join(tmpDir, 'output.mp4')
+
+    try {
+      const supabase = supabaseAdmin
+
+      const { data: record, error: fetchError } = await supabase
+        .from('videos')
+        .select('*')
+        .eq('id', videoId)
+        .single()
+
+      if (fetchError || !record) {
+        send({ error: 'Video record not found' })
+        return
+      }
+
+      if (record.video_path.toLowerCase().endsWith('.mp4')) {
+        send({ error: 'Video is already MP4' })
+        return
+      }
+
+      const { data: fileData, error: downloadError } = await supabase.storage
+        .from('videos')
+        .download(record.video_path)
+
+      if (downloadError || !fileData) {
+        send({ error: 'Failed to download video' })
+        return
+      }
+
+      await fs.writeFile(inputPath, Buffer.from(await fileData.arrayBuffer()))
+
+      // Try stream copy first — instant if codecs are already MP4-compatible (H.264/AAC).
+      // Fall back to re-encoding with ultrafast preset if copy fails.
+      const runFfmpeg = (copyOnly: boolean) =>
+        new Promise<void>((resolve, reject) => {
+          const cmd = ffmpeg(inputPath).output(outputPath)
+          if (copyOnly) {
+            cmd.outputOptions(['-c copy', '-movflags +faststart'])
+          } else {
+            cmd
+              .videoCodec('libx264')
+              .audioCodec('aac')
+              .outputOptions(['-movflags +faststart', '-preset ultrafast', '-crf 23'])
+              .on('progress', (p) => {
+                const percent = Math.min(99, Math.max(0, Math.round(p.percent ?? 0)))
+                send({ percent })
+              })
+          }
+          cmd.on('end', () => resolve()).on('error', (err) => reject(err)).run()
+        })
+
+      try {
+        await runFfmpeg(true)
+      } catch {
+        await fs.rm(outputPath, { force: true }).catch(() => {})
+        await runFfmpeg(false)
+      }
+
+      const convertedBuffer = await fs.readFile(outputPath)
+      const convertedPath = record.video_path.replace(/\.[^/.]+$/, '.mp4')
+
+      const { error: uploadError } = await supabase.storage
+        .from('videos')
+        .upload(convertedPath, convertedBuffer, { contentType: 'video/mp4', upsert: true })
+
+      if (uploadError) {
+        send({ error: uploadError.message })
+        return
+      }
+
+      await supabase.storage.from('videos').remove([record.video_path])
+
+      const { data: updatedRecord, error: updateError } = await supabase
+        .from('videos')
+        .update({ video_path: convertedPath })
+        .eq('id', videoId)
+        .select()
+        .single()
+
+      if (updateError) {
+        send({ error: updateError.message })
+        return
+      }
+
+      send({ done: true, video: updatedRecord })
+    } catch (err) {
+      console.error('Conversion error:', err)
+      send({ error: 'Conversion failed' })
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
+      writer.close()
+    }
+  })()
+
+  return new Response(readable, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+    },
+  })
 }
