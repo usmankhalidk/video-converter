@@ -1,21 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createServiceClient } from '@/lib/supabase'
+import { supabaseAdmin } from '@/lib/supabase-admin'
 
 export const runtime = 'nodejs'
 
 export async function GET(request: NextRequest) {
-  const userId = request.nextUrl.searchParams.get('user_id')
+  const browserId = request.nextUrl.searchParams.get('browser_id')
 
-  if (!userId) {
-    return NextResponse.json({ error: 'No user_id provided' }, { status: 400 })
+  if (!browserId) {
+    return NextResponse.json({ error: 'No browser_id provided' }, { status: 400 })
   }
 
-  const supabase = createServiceClient()
+  const supabase = supabaseAdmin
 
   const { data, error } = await supabase
     .from('videos')
     .select('*')
-    .eq('user_id', userId)
+    .eq('browser_id', browserId)
     .order('created_at', { ascending: false })
 
   if (error) {

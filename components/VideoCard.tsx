@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { getSupabaseClient } from '@/lib/supabase'
+import { supabase } from '@/lib/supabase'
 import { VideoRecord } from '@/lib/types'
 
 interface VideoCardProps {
@@ -13,8 +13,10 @@ export default function VideoCard({ video, onConverted }: VideoCardProps) {
   const [converting, setConverting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const isMp4 = video.video_path.toLowerCase().endsWith('.mp4')
+
   function getPublicUrl(path: string) {
-    const { data } = getSupabaseClient().storage.from('videos').getPublicUrl(path)
+    const { data } = supabase.storage.from('videos').getPublicUrl(path)
     return data.publicUrl
   }
 
@@ -40,44 +42,30 @@ export default function VideoCard({ video, onConverted }: VideoCardProps) {
     }
   }
 
-  const originalUrl = getPublicUrl(video.original_video_path)
-  const convertedUrl = video.converted_video_path
-    ? getPublicUrl(video.converted_video_path)
-    : null
-
   return (
     <div className="bg-white rounded-2xl shadow-md p-5 flex flex-col gap-4">
       <div>
         <p className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">
-          Original Video
+          {isMp4 ? 'Video' : 'Original Video'}
         </p>
         <video
-          src={originalUrl}
+          src={getPublicUrl(video.video_path)}
           controls
           className="w-full rounded-xl bg-black"
           style={{ maxHeight: '300px' }}
         />
       </div>
 
-      {convertedUrl ? (
-        <div>
-          <p className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">
-            Converted Video
-          </p>
-          <video
-            src={convertedUrl}
-            controls
-            className="w-full rounded-xl bg-black"
-            style={{ maxHeight: '300px' }}
-          />
-        </div>
-      ) : (
+      {!isMp4 && (
         <div className="flex flex-col gap-2">
           <button
             onClick={handleConvert}
             disabled={converting}
-            className="w-full py-2 px-4 rounded-xl bg-indigo-600 text-white font-medium hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            className="w-full py-2 px-4 rounded-xl bg-indigo-600 text-white font-medium hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
           >
+            {converting && (
+              <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+            )}
             {converting ? 'Converting…' : 'Convert to MP4'}
           </button>
           {error && <p className="text-sm text-red-500">{error}</p>}

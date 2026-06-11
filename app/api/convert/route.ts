@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createServiceClient } from '@/lib/supabase'
+import { supabaseAdmin } from '@/lib/supabase-admin'
 import ffmpeg from 'fluent-ffmpeg'
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg'
 import { promises as fs } from 'fs'
@@ -23,7 +23,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'No videoId provided' }, { status: 400 })
     }
 
-    const supabase = createServiceClient()
+    const supabase = supabaseAdmin
 
     const { data: record, error: fetchError } = await supabase
       .from('videos')
@@ -35,32 +35,26 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Video record not found' }, { status: 404 })
     }
 
-    if (record.converted_video_path) {
-      return NextResponse.json({ error: 'Video already converted' }, { status: 400 })
+    // Already an MP4 — nothing to do
+    if (record.video_path.toLowerCase().endsWith('.mp4')) {
+      return NextResponse.json({ error: 'Video is already MP4' }, { status: 400 })
     }
 
-    // Download original video from storage
     const { data: fileData, error: downloadError } = await supabase.storage
       .from('videos')
-      .download(record.original_video_path)
+      .download(record.video_path)
 
     if (downloadError || !fileData) {
-      return NextResponse.json({ error: 'Failed to download original video' }, { status: 500 })
+      return NextResponse.json({ error: 'Failed to download video' }, { status: 500 })
     }
 
-    const inputBuffer = Buffer.from(await fileData.arrayBuffer())
-    await fs.writeFile(inputPath, inputBuffer)
+    await fs.writeFile(inputPath, Buffer.from(await fileData.arrayBuffer()))
 
-    // Convert using FFmpeg
     await new Promise<void>((resolve, reject) => {
       ffmpeg(inputPath)
         .videoCodec('libx264')
         .audioCodec('aac')
-        .outputOptions([
-          '-movflags +faststart',
-          '-preset medium',
-          '-crf 23',
-        ])
+        .outputOptions(['-movflags +faststart', '-preset medium', '-crf 23'])
         .output(outputPath)
         .on('end', () => resolve())
         .on('error', (err) => reject(err))
@@ -69,23 +63,23 @@ export async function POST(request: NextRequest) {
 
     const convertedBuffer = await fs.readFile(outputPath)
 
-    // Build converted file path
-    const convertedFileName = record.original_video_path.replace(/\.[^/.]+$/, '') + '_converted.mp4'
+    // New path: same folder, same uuid, but .mp4 extension
+    const convertedPath = record.video_path.replace(/\.[^/.]+$/, '.mp4')
 
     const { error: uploadError } = await supabase.storage
       .from('videos')
-      .upload(convertedFileName, convertedBuffer, {
-        contentType: 'video/mp4',
-        upsert: true,
-      })
+      .upload(convertedPath, convertedBuffer, { contentType: 'video/mp4', upsert: true })
 
     if (uploadError) {
       return NextResponse.json({ error: uploadError.message }, { status: 500 })
     }
 
+    // Delete the original non-MP4 file from storage
+    await supabase.storage.from('videos').remove([record.video_path])
+
     const { data: updatedRecord, error: updateError } = await supabase
       .from('videos')
-      .update({ converted_video_path: convertedFileName, conversion_method: 'nextjs' })
+      .update({ video_path: convertedPath })
       .eq('id', videoId)
       .select()
       .single()
