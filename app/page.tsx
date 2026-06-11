@@ -44,6 +44,10 @@ export default function HomePage() {
     setVideos((prev) => prev.map((v) => (v.id === updated.id ? updated : v)))
   }
 
+  function handleDeleted(id: string) {
+    setVideos((prev) => prev.filter((v) => v.id !== id))
+  }
+
   return (
     <main className="min-h-screen bg-gray-50">
       <div className="max-w-3xl mx-auto px-4 py-12">
@@ -67,7 +71,7 @@ export default function HomePage() {
         ) : (
           <div className="flex flex-col gap-6">
             {videos.map((video) => (
-              <VideoCard key={video.id} video={video} onConverted={handleConverted} />
+              <VideoCard key={video.id} video={video} onConverted={handleConverted} onDeleted={handleDeleted} />
             ))}
           </div>
         )}
