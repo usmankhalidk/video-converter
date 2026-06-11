@@ -11,7 +11,6 @@ interface VideoCardProps {
 
 export default function VideoCard({ video, onConverted }: VideoCardProps) {
   const [converting, setConverting] = useState(false)
-  const [progress, setProgress] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const isMp4 = video.video_path.toLowerCase().endsWith('.mp4')
@@ -23,7 +22,6 @@ export default function VideoCard({ video, onConverted }: VideoCardProps) {
 
   async function handleConvert() {
     setConverting(true)
-    setProgress(0)
     setError(null)
     try {
       const res = await fetch('/api/convert', {
@@ -31,44 +29,16 @@ export default function VideoCard({ video, onConverted }: VideoCardProps) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ videoId: video.id }),
       })
-
-      if (!res.body) {
-        setError('Conversion failed. Please try again.')
+      const json = await res.json()
+      if (!res.ok) {
+        setError(json.error || 'Conversion failed')
         return
       }
-
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-
-        buffer += decoder.decode(value, { stream: true })
-        // SSE events are separated by double newlines
-        const events = buffer.split('\n\n')
-        buffer = events.pop() ?? ''
-
-        for (const event of events) {
-          const line = event.trim()
-          if (!line.startsWith('data: ')) continue
-          let data: Record<string, unknown>
-          try {
-            data = JSON.parse(line.slice(6))
-          } catch {
-            continue
-          }
-          if (typeof data.percent === 'number') setProgress(data.percent)
-          if (data.error) { setError(data.error as string); return }
-          if (data.done) { onConverted(data.video as VideoRecord); return }
-        }
-      }
+      onConverted(json.video)
     } catch {
       setError('Conversion failed. Please try again.')
     } finally {
       setConverting(false)
-      setProgress(null)
     }
   }
 
@@ -96,9 +66,7 @@ export default function VideoCard({ video, onConverted }: VideoCardProps) {
             {converting && (
               <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
             )}
-            {converting
-              ? `Converting… ${progress !== null && progress > 0 ? `${progress}%` : ''}`
-              : 'Convert to MP4'}
+            {converting ? 'Converting…' : 'Convert to MP4'}
           </button>
           {error && <p className="text-sm text-red-500">{error}</p>}
         </div>
